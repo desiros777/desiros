@@ -1,0 +1,265 @@
+/* Copyright (C) 2005 David Decotigny
+
+   This program is free software; you can redistribute it and/or
+   modify it under the terms of the GNU General Public License
+   as published by the Free Software Foundation; either version 2
+   of the License, or (at your option) any later version.
+   
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+   
+   You should have received a copy of the GNU General Public License
+   along with this program; if not, write to the Free Software
+   Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307,
+   USA. 
+*/
+#ifndef UMEM_H_
+#define UMEM_H_
+
+/**
+ * @file umem_vmm.h
+ *
+ * Management of the address space of a process in SOS. The so-called
+ * "address space" of a process consists in the description of the
+ * virtual addresses that are valid in the user space of a process (in
+ * SOS: addresses 1G-4G). The kernel-space of a process is managed by
+ * the "kmem" subsystem, and is kept identical accross all the
+ * processes in the system.
+ *
+ * The umem_vmm subsystem handles the following features:
+ *  - demand-mapping of resourcs (files: mmap): mapping in physical RAM
+ *    will be delayed as much as possible, until the process really
+ *    need to access the mapped addresses
+ *  - mprotect/mremap support
+ *  - private and shared mappings
+ *  - Copy-On-Write (COW) of the private mappings upon fork() to favour
+ *    shared physical memory as much as possible
+ *  - "heap" management (brk/sbrk)
+ *
+ * Swap is NOT supported (yet), which means that the following is NOT
+ * supported:
+ *  - locked/reserved I/O pages (everything is locked in RAM)
+ *  - "safe" demand-mapping of anonymous pages, ie conservative VMM
+ *    allocation (alloc of anonymous pages on the swap)
+ * Other unsupported features:
+ *  - dynamically-resizable regions (Linux's GROWUP/GROWDOWN vma): the
+ *    user stack is expected to have a suitable virtual size from the
+ *    beginning, or sos_umem_vmm_resize() must be used explicitely to
+ *    resize it
+ *  - no provision of "stack size" accounting, since there are
+ *    multiple stacks (ie user threads) in a process: which stack to
+ *    consider ???
+ *
+ * The address space is divided into "virtual regions" (aka "VR") that
+ * describe a single mapping, aka a segment of contiguous pages in
+ * user-space virtual memory. Each such virtual region "maps" a
+ * "resource" and is characterised by:
+ *   - its base address and length in user-space
+ *   - the allowed accesses, aka "protection" (read-only or read/write)
+ *   - the resource it maps in virtual memory
+ *
+ * A so-called resource is typically:
+ *   - a file
+ *   - a device
+ *   - an area initially full of zeros (the VR mapping this are called
+ *     "anonymous mappings")
+ *
+ * The implementation is very close to that of Linux and Kos. This is
+ * a "simple" implementation, not the most elegant one, such as those
+ * based on "shadow objects" hierarchies as found in BSD 4.4 and Mach,
+ * or that of Solaris (based on the "anon" lists). Actually, this
+ * implementation does not use "shadow-objects"/anon list when a COW
+ * page of a shared mapping is made anonymous. This won't hurt the
+ * implementation of the basic demand-mapping mechanism; on the
+ * contrary, it will make things simpler. But this will largely impact
+ * the implementation of the swap-in/swap-out strategies, as these
+ * would require a non trivial intrication of low-level and higher
+ * level algorithms.
+ */
+
+
+/**
+ * Definition of an "address space" . This is an opaque
+ * structure defined in umem_vmm.c. Its main role is to list virtual
+ * regions. It mainly consists in:
+ *  - a reference to the process owning it
+ *  - maximum allowed protection (ie can it be mapped read-only or
+ *    read/write ?)
+ *  - the list of VRs mapping resources
+ *  - a mm_context that reflects the configuration of the MMU
+ *  - the location of the heap for this process
+ *  - statistics
+ */
+struct umem_as;
+
+
+/**
+ * Definition of a "virtual region". Linux would call them "vma"
+ * (Virtual Memory Area), and Solaris: "segments". It mainly consists
+ * in:
+ *  - the start/end addresses of the mapping
+ *  - a pointer to the resource that it maps
+ *  - the type of mapping (shared/private)
+ *  - the actual protection flags (@see SOS_VM_MAP_PROT_* flags in
+ *    hwcore/paging.h)
+ *  - a set of callbacks (@see sos_umem_vmm_vr_ops below) automatically
+ *    called by the umem_vmm subsystem each time the VR is modified
+ */
+struct umem_vr;
+
+
+/** VR flag: region can be shared between a process and its
+    children */
+#define SOS_VR_MAP_SHARED (1 << 0)
+
+
+#include <types.h>
+
+
+
+/**
+ * The callbacks applicable on a virtual region. Automatically called
+ * by the umem_vmm subsystem.
+ *
+ * Calling sequences:
+ * - duplicate_as() (aka fork()):
+ *    vr->ops->ref()
+ *    add vr to lists
+ * - delete_as() (aka exit()):
+ *    vr->ops->unmap()
+ *    remove vr from lists
+ *    vr->ops->unref()
+ * - mmap():
+ *    -> left + new + right VRs can fusion:
+ *        remove right_vr from list
+ *        right_vr->ops->unref()
+ *    -> left + new VRs can fusion:
+ *        nothing
+ *    -> new + right VRs can fusion:
+ *        nothing
+ *    -> isolated:
+ *        add new_vr to lists
+ *        new_vr->map()
+ *        new_vr->ops->ref()
+ * - munmap():
+ *    -> VR totally unmapped:
+ *        vr->ops->unmap()
+ *        remove vr from lists
+ *        vr->ops->unref()
+ *    -> VR unmapped in the middle (split into 2):
+ *        add (new) right VR into the lists
+ *        vr->unmap(middle_unmapped_area)
+ *        right_vr->ops->ref()
+ *    -> VR unmapped on its left:
+ *        vr->ops->unmap(left_unmapped_area)
+ *    -> VR unmapped on its right:
+ *        vr->ops->unmap(right_unmapped_area)
+ * - chprot():
+ *    -> VR totally chprot:
+ *        nothing
+ *    -> VR chprot in the middle (split into 3):
+ *        add (new) middle+right VRs into the lists
+ *        middle_vr->ops->ref()
+ *        right_vr->ops->ref()
+ *    -> VR chprot on its left (split into 2):
+ *        add (new) right VR into the lists
+ *        right_vr->ops->ref()
+ *    -> VR chprot on its right (split into 2):
+ *        add (new) right VR into the lists
+ *        right_vr->ops->ref()
+ * - resize():
+ *    -> if moving the VR: map/unmap
+ *    -> otherwise: nothing
+ */
+struct umem_vr_ops
+{
+  /**
+   * Called after the virtual region has been inserted
+   * inside its address space.
+   * @note Optional
+   */
+  void (*ref)(struct umem_vr * vr);
+
+  /**
+   * Called when the virtual region is removed from its
+   * address space
+   * @note Optional
+   */
+  void (*unref)(struct umem_vr * vr);
+
+  /**
+   * Called when part or all a VR is unmapped
+   * @note Optional
+   */
+  void (*unmap)(struct umem_vr * vr,
+		uint32 uaddr, sos_size_t size);
+
+  /**
+   * Called by the page fault handler to map data at the given virtual
+   * address. In the Linux kernel, this callback is named "nopage".
+   *
+   * @note MANDATORY
+   */
+  int (*page_in)(struct umem_vr * vr,
+		       uint32 uaddr,
+		       bool write_access);
+};
+
+
+/**
+ * The definition of a mapped resource. Typically, a mapped resource
+ * is a file or a device: in both cases, only part of the resource is
+ * mapped by each VR, this part is given by the offset_in_resource
+ * field of the VR, and the size field of the VR.
+ */
+struct umem_mapped_resource
+{
+  /** Represent the maximum authrized SOS_VR_PROT_* for the VRs mapping
+      it */
+  uint32  allowed_access_rights;
+
+  /** Some flags associated with the resource. Currently only
+      SOS_MAPPED_RESOURCE_ANONYMOUS is supported */
+  uint32  flags;
+
+  /** List of VRs mapping this resource */
+  struct umem_vr * list_vr;
+
+  /**
+   * MANDATORY Callback function called when a new VR is created,
+   * which maps the resource. This callback is allowed to change the
+   * following fields of the VR:
+   *   - sos_umem_vmm_set_ops_of_vr()
+   */
+  int (*mmap)(struct umem_vr *);
+
+  /**
+   * Custom data that the user is free to define: the umem_vmm
+   * subsystem won't ever look at it or change it
+   */
+  void *custom_data;
+};
+
+
+/** Inidicate that this resource is not backed by any physical
+    storage. This means that the "offset_in_resource" field of the
+    VRs will be computed by sos_umem_vmm_map() */
+#define MAPPED_RESOURCE_ANONYMOUS (1 << 0)
+
+
+/**
+ * Physical address of THE page (full of 0s) used for anonymous
+ * mappings. Anybody can map it provided it is ALWAYS in read-only
+ * mode
+ */
+extern uint32 zero_page;
+#endif
+
+
+
+
+
+
+#endif

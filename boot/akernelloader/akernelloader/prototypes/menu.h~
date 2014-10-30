@@ -1,0 +1,21 @@
+
+#ifndef __MENU_H__
+#define __MENU_H__	1
+
+#define MENU_BUF	0x78000
+#define MENU_BUFLEN	0x6000
+#define CONFIG_BUF	(MENU_BUF + MENU_BUFLEN)
+
+
+#ifdef __DEF_MENU__
+char * menu_entries = (char *) MENU_BUF;
+char * config_entries = (char *) CONFIG_BUF;
+#else
+extern char * menu_entries ;
+extern char * config_entries ;
+#endif
+
+int num_menu_entries ;
+int run_menu_akernelloder();
+
+#endif

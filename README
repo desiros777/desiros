@@ -1,0 +1,12 @@
+Desiros guide instalation
+-------------------------
+To install desiros on a disk or usb you should format partition and install the bootloader read the "install" file in the /boot/akernelloader.
+
+Compilation:
+------------
+First open the folder /boot/akernelloader and use the make command.
+To compile the kernel use the command make in the main directory the compiled kernel is called desiros.elf.
+
+Attention:
+----------
+If you install on USB disconnect and reconnect for the changes are well recorded.

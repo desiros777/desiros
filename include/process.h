@@ -1,0 +1,90 @@
+
+#ifndef _PROCESS_H_
+#define _PROCESS_H_
+
+#include <types.h>
+#include <uvmm.h>
+#include <fd_types.h>
+
+#define KERNELMODE 0
+#define USERMODE   1
+
+#define MAXPID	32
+
+/* For  paging_pd_add_pt() */
+struct page_table{
+        __u32* pt;
+        struct page_table *prev,*next;
+
+        }page_table;
+
+struct kslab_cache * cache_pt;
+
+
+struct process{
+	unsigned int pid;
+
+    struct {
+		__u32 eax, ecx, edx, ebx;
+		__u32 esp, ebp, esi, edi;
+		__u32 eip, eflags;
+		__u32 cs:16, ss:16, ds:16, es:16, fs:16, gs:16;
+		__u32 cr3;
+	} regs __attribute__ ((packed));
+  
+        struct {
+		__u32 esp0;
+		__u16 ss0;
+	} kstack __attribute__ ((packed));
+/*  important resource: the address space */
+  struct uvmm_as *address_space;
+  struct page_table * list_pt;
+  open_file_descriptor* fd[FOPEN_MAX];
+
+  int state;
+
+} __attribute__ ((packed));
+
+
+/**
+ * The possible states of a valid process
+ */
+typedef enum { 
+               PROC_STOPPED,
+	       PROC_READY,   /*     fully initialized or
+				     waiting for CPU after having been
+				     blocked or preempted */
+	       PROC_RUNNING, /*   currently running on CPU */
+	       PROC_BLOCKED, /*   waiting for I/O (+ in at LEAST
+				     one kwaitq) and/or sleeping (+ in NO
+				     kwaitq) */
+	       PROC_ZOMBIE,  /* terminated execution, waiting to
+				     be deleted by kernel */
+
+             } process_state_t;
+
+
+#ifdef __PLIST__
+struct process p_list[32];
+struct process *current = 0;
+int num_proc = 0;
+#else
+extern struct process p_list[];
+extern struct process *current ;
+extern int num_proc;
+#endif
+
+
+
+
+
+void load_task(char *str);
+
+int process_set_address_space(struct process *proc,
+					struct uvmm_as *new_as);
+
+struct uvmm_as * process_get_address_space(const struct process *proc);
+
+#endif
+
+

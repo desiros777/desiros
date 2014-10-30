@@ -1,0 +1,85 @@
+
+#ifndef SCHED_H_
+#define SCHED_H_
+
+
+/**
+ * @file sched.h
+ *
+ * A basic scheduler inspired from the O(1) Linux scheduler. Supports
+ * 2 classes of thread priorities:
+ *  - so-called 'real-time' threads scheduled according to a simple
+ *    traditional static priority real-time scheduler. "Real-time" round
+ *    robin scheduling is not supported.
+ * - "fair" time-sharing scheduling for non real-time threads. "fair"
+ *    because no starvation among the non real-time threads is
+ *    possible. Contrary to the original O(1) Linux scheduler, the
+ *    on-line adjustment of the scheduling priorities to cope with
+ *    interactive/non interactive threads discrimination is not
+ *    supported: threads keep having the same priority as long as the
+ *    user does not change it.
+ *
+ * The functions below manage CPU queues, and are NEVER responsible
+ * for context switches (see thread.h for that) or synchronizations
+ * (see kwaitq.h or the higher levels primitives [mutex, semaphore,
+ * ...] for that).
+ *
+ * @note IMPORTANT: all the functions below are meant to be called
+ * ONLY by the thread/timer/kwaitq subsystems. DO NOT use them
+ * directly from anywhere else: use ONLY the thread/kwaitq functions!
+ * If you still want to call them directly despite this disclaimer,
+ * simply disable interrupts before clling them.
+ */
+
+
+#include <time.h>
+
+
+/**
+ * The definition of a priority
+ */
+typedef unsigned char sched_priority_t;
+
+
+
+
+#include <thread.h>
+
+
+/**
+ * Valid priority interval ("real-time" and non real-time threads altogether)
+ */
+#define SCHED_PRIO_HIGHEST 0
+#define SCHED_PRIO_LOWEST  63
+#define SCHED_NUM_PRIO     64
+
+
+/**
+ * The definition of the scheduler queue. We could have used a normal
+ * kwaitq here, it would have had the same properties (regarding
+ * priority ordering mainly). But we don't bother with size
+ * considerations here (in kwaitq, we had better make the kwaitq
+ * structure as small as possible because there are a lot of kwaitq in
+ * the system: at least 1 per opened file), so that we can implement a
+ * much faster way of handling the prioritized jobs.
+ */
+struct sched_queue
+{
+  unsigned int nr_threads;
+  struct thread *thread_list[SCHED_NUM_PRIO];
+};
+
+
+
+/**
+ * Class-specific priorities
+ */
+#define SCHED_PRIO_RT_HIGHEST 0  /**< Highest 'real-time' static prio. */
+#define SCHED_PRIO_RT_LOWEST  15 /**< Lowest 'real-time' static priority */
+#define SCHED_PRIO_TS_HIGHEST 16 /**< Highest time-sharing priority */
+#define SCHED_PRIO_TS_LOWEST  63 /**< Lowest time-sharing priority */
+
+#define SCHED_PRIO_DEFAULT 40    /**< Default priority */
+
+
+#endif 

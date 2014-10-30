@@ -1,0 +1,17 @@
+K 25
+svn:wc:ra_dav:version-url
+V 52
+/svn/!svn/ver/3/trunk/akernelloader/prototypes/os_ak
+END
+linux_ak.h
+K 25
+svn:wc:ra_dav:version-url
+V 63
+/svn/!svn/ver/3/trunk/akernelloader/prototypes/os_ak/linux_ak.h
+END
+freebsd.h
+K 25
+svn:wc:ra_dav:version-url
+V 62
+/svn/!svn/ver/3/trunk/akernelloader/prototypes/os_ak/freebsd.h
+END

@@ -1,0 +1,31 @@
+#ifndef MEMCTXT_H_
+#define MEMCTXT_H_
+
+
+/**
+ *
+ * Low level API to manage multiple MMU translation tables. The API
+ * (not its implementation) should be some kind of
+ * architecture-independent.
+ *
+ * The goal of this API is:
+ *   - To provide a simple arch-independent API to change the current
+ *     address space configured in the MMU
+ *   - To make sure that ALL the kernel space mappings are always kept
+ *     IDENTICAL among all the address spaces in the whole system. That
+ *     way, a virtual address in the kernel space refers to EXACTLY the
+ *     same physical memory location for all the address spaces.
+ */
+
+
+
+
+/**
+ * Declaration of an MMU context. Opaque structure defined in
+ * mm_context.c
+ */
+struct mem_context;
+
+
+
+#endif 

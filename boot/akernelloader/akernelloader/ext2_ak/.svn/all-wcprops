@@ -1,0 +1,17 @@
+K 25
+svn:wc:ra_dav:version-url
+V 43
+/svn/!svn/ver/3/trunk/akernelloader/ext2_ak
+END
+Makefile
+K 25
+svn:wc:ra_dav:version-url
+V 52
+/svn/!svn/ver/3/trunk/akernelloader/ext2_ak/Makefile
+END
+ext2fs_ak.c
+K 25
+svn:wc:ra_dav:version-url
+V 55
+/svn/!svn/ver/3/trunk/akernelloader/ext2_ak/ext2fs_ak.c
+END

@@ -1,0 +1,392 @@
+
+#include <uvmm.h>
+#include <physmem.h>
+#include <types.h>
+#include <klibc.h>
+#include <debug.h>
+#include <kmalloc.h>
+#include <syscall.h>
+#include <kfcntl.h>
+#include <kstat.h>
+
+#define PT_NULL		0		/**< Unused element */
+#define	PT_LOAD		1		/**< Loadable segment */
+#define PT_DYNAMIC	2	        /**< Dynamic linking information */
+#define	PT_INTERP	3		/**< Pathname to an interpreter */
+#define	PT_NOTE		4		/**< Auxiliary informations */
+#define PT_SHLIB	5		/**< No specified semantics */
+#define PT_PHDR		6		/**< Specifie location of the program header table itself */
+#define PT_LOPROC	0x7000000	/**< Processor specific semantics */
+#define PT_HIPROC	0x7FFFFFF	/**< Processor specific semantics */
+
+  /**
+   * Typedefs, constants and structure definitions as given by the ELF
+   * standard specifications.
+   */
+typedef unsigned long Elf32_Addr;
+typedef unsigned short Elf32_Half;
+typedef unsigned long Elf32_Off;
+typedef signed long Elf32_Sword;
+typedef unsigned long Elf32_Word;
+
+  /* Elf identification */
+  
+#define EI_NIDENT 16
+  typedef struct {
+    unsigned char       e_ident[EI_NIDENT];
+    Elf32_Half          e_type;
+    Elf32_Half          e_machine;
+    Elf32_Word          e_version;
+    Elf32_Addr          e_entry;
+    Elf32_Off           e_phoff;
+    Elf32_Off           e_shoff;
+    Elf32_Word          e_flags;
+    Elf32_Half          e_ehsize;
+    Elf32_Half          e_phentsize;
+    Elf32_Half          e_phnum;
+    Elf32_Half          e_shentsize;
+    Elf32_Half          e_shnum;
+    Elf32_Half          e_shstrndx;
+  } __attribute__((packed)) Elf32_Ehdr_t;
+
+  typedef struct {
+  Elf32_Word	p_type;			/* Segment type */
+  Elf32_Off	p_offset;		/* Segment file offset */
+  Elf32_Addr	p_vaddr;		/* Segment virtual address */
+  Elf32_Addr	p_paddr;		/* Segment physical address */
+  Elf32_Word	p_filesz;		/* Segment size in file */
+  Elf32_Word	p_memsz;		/* Segment size in memory */
+  Elf32_Word	p_flags;		/* Segment flags */
+  Elf32_Word	p_align;		/* Segment alignment */
+  } __attribute__((packed)) Elf32_Phdr_t;
+
+
+/**
+ * Symbol marking the start of the userprogs table, as setup by the
+ * ld script in the userland/ directory
+ */
+extern char _userprogs_table;
+
+
+/**
+ * Structure of a mapped resource for an ELF32 program (ie a portion
+ * of the kernel space)
+ */
+struct elf32_mapped_program
+{
+  __u32 vaddr;
+  __u32  size;
+  int ref_cnt;
+
+  struct uvmm_mapped_resource mr;
+};
+
+
+/** Called after the virtual region has been inserted inside its
+    address space */
+static void elf32prog_ref(struct uvmm_arena * arena)
+{
+  struct elf32_mapped_program * elf32prog_resource;
+  elf32prog_resource = (struct elf32_mapped_program*) uvmm_get_mapped_resource_of_arena(arena)->custom_data;
+  
+  elf32prog_resource->ref_cnt ++;
+}
+
+
+/** Called when the virtual region is removed from its address
+    space */
+static void elf32prog_unref(struct uvmm_arena * arena)
+{
+  struct elf32_mapped_program * elf32prog_resource;
+  elf32prog_resource
+    = (struct elf32_mapped_program*)
+      uvmm_get_mapped_resource_of_arena(arena)->custom_data;
+  
+  elf32prog_resource->ref_cnt --;
+  if( 0 >= elf32prog_resource->ref_cnt) debug();
+
+  /* Free the resource if it becomes unused */
+  if (elf32prog_resource->ref_cnt == 0)
+    kfree((__u32)elf32prog_resource);
+}
+
+
+/** Called when a legitimate page fault is occuring in the arena */
+static int elf32prog_no_page(struct uvmm_arena * arena,
+				   __u32 uaddr,
+				   bool write_access)
+{
+  struct elf32_mapped_program * elf32prog_resource;
+  int     retval = 0;
+  __u32   ppage_paddr;
+  __u32   upage_uaddr = PAGE_ALIGN_INF(uaddr);
+  __u64 offset_in_prog;
+  __u32    size_to_copy;
+
+  flush_tlb_all();
+ 
+  elf32prog_resource
+    = (struct elf32_mapped_program*)
+      uvmm_get_mapped_resource_of_arena(arena)->custom_data;
+
+  /* Compute the offset in program of the page, and the size to copy
+     in user space */
+  offset_in_prog = upage_uaddr - uvmm_get_start_of_arena(arena) + uvmm_get_offset_in_resource(arena) ;
+  size_to_copy = PAGE_SIZE;
+
+  if (offset_in_prog + size_to_copy > elf32prog_resource->size)
+    size_to_copy = elf32prog_resource->size - offset_in_prog;
+
+      /* Allocate a new page that contains the code/data of the
+	 program */
+      ppage_paddr = physmem_ref_physpage_new(false);
+      if (! ppage_paddr)
+	return -3;
+      
+      /* Map it in user space, in read/write mode for the kernel to copy
+	 the data in the page */
+      retval = paging_map(upage_uaddr,ppage_paddr,
+			      true);
+
+      if(0 != retval) debug();
+
+      physmem_unref_physpage(ppage_paddr);
+      
+      /* Copy the program in it */
+      memcpy((void*)upage_uaddr,
+	     (void*)elf32prog_resource->vaddr + offset_in_prog,
+	     size_to_copy);
+
+     if (size_to_copy < PAGE_SIZE){;
+	memset((void*)(uaddr + size_to_copy), 0x0,
+	       PAGE_SIZE - size_to_copy);
+      } 
+
+                 
+  return retval;
+}
+
+
+static struct uvmm_arena_ops elf32prog_ops = (struct uvmm_arena_ops)
+{
+  .ref     = elf32prog_ref,
+  .unref   = elf32prog_unref,
+  .no_page = elf32prog_no_page,
+  .unmap   = NULL /* ignored */
+};
+
+
+static __u32 elf32prog_mmap(struct uvmm_arena * arena)
+{
+  return uvmm_set_ops_of_arena(arena, &elf32prog_ops);
+}
+
+
+/*
+ * Local functions
+ */
+
+
+/**
+ * Function to locate the given user program image in the kernel memory
+ */
+static struct userprog_entry * lookup_userprog(const char *name);
+
+
+__u32 binfmt_elf32_map(struct  uvmm_as * dest_as,
+				 const char * progname)
+{
+  int i;
+
+/* e_ident value */
+#define ELFMAG0 0x7f
+#define ELFMAG1 'E'
+#define ELFMAG2 'L'
+#define ELFMAG3 'F'
+
+/* e_ident offsets */
+#define EI_MAG0         0
+#define EI_MAG1         1
+#define EI_MAG2         2
+#define EI_MAG3         3
+#define EI_CLASS        4
+#define EI_DATA         5
+#define EI_VERSION      6
+#define EI_PAD          7
+
+/* e_ident[EI_CLASS] */
+#define ELFCLASSNONE    0
+#define ELFCLASS32      1
+#define ELFCLASS64      2
+
+/* e_ident[EI_DATA] */
+#define ELFDATANONE     0
+#define ELFDATA2LSB     1
+#define ELFDATA2MSB     2
+
+/* e_type */
+#define ET_NONE         0  /* No file type       */
+#define ET_REL          1  /* Relocatable file   */
+#define ET_EXEC         2  /* Executable file    */
+#define ET_DYN          3  /* Shared object file */
+#define ET_CORE         4  /* Core file          */
+#define ET_LOPROC  0xff00  /* Processor-specific */
+#define ET_HIPROC  0xffff  /* Processor-specific */
+
+/* e_machine */
+#define EM_NONE       0  /* No machine     */
+#define EM_M32        1  /* AT&T WE 32100  */
+#define EM_SPARC      2  /* SPARC          */
+#define EM_386        3  /* Intel 80386    */
+#define EM_68K        4  /* Motorola 68000 */
+#define EM_88K        5  /* Motorola 88000 */
+#define EM_860        7  /* Intel 80860    */
+#define EM_MIPS       8  /* MIPS RS3000    */
+
+/* e_version */
+#define EV_NONE    0 /* invalid version */
+#define EV_CURRENT 1 /* current version */
+
+
+/* Reserved segment types p_type */
+#define PT_NULL    0
+#define PT_LOAD    1
+#define PT_DYNAMIC 2
+#define PT_INTERP  3
+#define PT_NOTE    4
+#define PT_SHLIB   5
+#define PT_PHDR    6
+#define PT_LOPROC  0x70000000
+#define PT_HIPROC  0x7fffffff
+
+/* p_flags */
+#define PF_X       1
+#define PF_W       2
+#define PF_R       4
+
+
+  Elf32_Ehdr_t *elf_hdr;
+  Elf32_Phdr_t *elf_phdrs;
+
+  struct elf32_mapped_program * mapped_prog;
+  __u32 prog_top_user_address = 0;
+
+  int fd = -1;
+  fd =  sys_open( progname , O_RDWR );
+
+struct stat st_buf;
+
+sys_stat(progname, &st_buf,NULL );
+
+ long prog_size = st_buf.st_size;
+
+
+  __u32 prog_bottom_vaddr = kmalloc(prog_size,0);
+  sys_read(fd, prog_bottom_vaddr , prog_size );
+
+  elf_hdr = (Elf32_Ehdr_t*) prog_bottom_vaddr ;
+
+
+  mapped_prog
+    = (struct elf32_mapped_program*)
+      kmalloc(sizeof(struct elf32_mapped_program), 0);
+  if (! mapped_prog)
+    return -3;
+
+
+  /* Initialize mapped resource */
+  memset(mapped_prog, 0x0, sizeof(*mapped_prog));
+  mapped_prog->mr.custom_data = mapped_prog;
+  mapped_prog->mr.mmap        = elf32prog_mmap;
+  mapped_prog->mr.allowed_access_rights
+    = (__u32 ) (P_READ
+    | P_WRITE
+    | P_USER );
+  mapped_prog->vaddr          = prog_bottom_vaddr;
+  mapped_prog->size           = prog_size ;
+  
+  /* Macro to check expected values for some fields in the ELF header */
+#define ELF_CHECK(hdr,field,expected_value) \
+  ({ if ((hdr)->field != (expected_value)) \
+     { \
+      debug("ELF prog : for %s, expected %x, got %x\n", \
+			 #field, \
+			(unsigned)(expected_value), \
+			(unsigned)(hdr)->field); \
+       return 0; \
+     } \
+  })
+
+  ELF_CHECK(elf_hdr, e_ident[EI_MAG0], ELFMAG0);
+  ELF_CHECK(elf_hdr, e_ident[EI_MAG1], ELFMAG1);
+  ELF_CHECK(elf_hdr, e_ident[EI_MAG2], ELFMAG2);
+  ELF_CHECK(elf_hdr, e_ident[EI_MAG3], ELFMAG3);
+  ELF_CHECK(elf_hdr, e_ident[EI_CLASS], ELFCLASS32);
+  ELF_CHECK(elf_hdr, e_ident[EI_DATA], ELFDATA2LSB);
+  ELF_CHECK(elf_hdr, e_type, ET_EXEC);
+  ELF_CHECK(elf_hdr, e_version, EV_CURRENT);
+
+  /* Get the begining of the program header table */
+  elf_phdrs = (Elf32_Phdr_t*) (prog_bottom_vaddr + elf_hdr->e_phoff);
+
+  /* Map the program segment in R/W mode. To make things clean, we
+     should iterate over the sections, not the program header */
+  for (i = 0 ; i  < elf_hdr->e_phnum ; i++)
+    {
+      __u32 prot_flags;
+      __u32 uaddr;
+
+      /* Ignore the empty program headers that are not marked "LOAD" */
+      if (elf_phdrs[i].p_type != PT_LOAD)
+	{
+	  if (elf_phdrs[i].p_memsz != 0)
+	    {
+	      debug("ELF: non-empty non-LOAD segments not supported yet");
+	    }
+	  continue;
+	}
+      
+      if (elf_phdrs[i].p_vaddr < USER_OFFSET)
+	{
+	  debug("User program has an incorrect address");
+	}
+
+      prot_flags = 0;
+      if (elf_phdrs[i].p_flags & P_READ)
+	prot_flags |= P_READ;
+      if (elf_phdrs[i].p_flags & P_WRITE)
+	prot_flags |= P_WRITE;
+      if (elf_phdrs[i].p_flags & P_USER)
+	prot_flags |= P_USER;
+
+      uaddr = elf_phdrs[i].p_vaddr;
+      if( ! IS_PAGE_ALIGNED(uaddr)) debug();
+
+  
+      /* First of all: map the region of the phdr which is also
+	 covered by the file */
+       if(0 != uvmm_map(dest_as, &uaddr,
+					   PAGE_ALIGN_SUP(elf_phdrs[i].p_filesz),
+					   prot_flags,
+					   NULL,
+					   & mapped_prog->mr,
+					   elf_phdrs[i].p_offset)){ debug();}
+         
+    
+      /* Then map the remaining by a zero resource */
+      uaddr += PAGE_ALIGN_SUP(elf_phdrs[i].p_filesz);
+
+      if (prog_top_user_address
+	  < uaddr + PAGE_ALIGN_SUP(elf_phdrs[i].p_memsz))
+	prog_top_user_address
+	  = uaddr + PAGE_ALIGN_SUP(elf_phdrs[i].p_memsz);
+    }
+
+  /* Now prepare the heap */
+  uvmm_init_heap(dest_as, prog_top_user_address);
+
+  return elf_hdr->e_entry;
+}
+
+
+

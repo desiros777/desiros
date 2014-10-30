@@ -1,0 +1,74 @@
+/**
+ * @file fd_types.h
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 3 of
+ * the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details at
+ * http://www.gnu.org/copyleft/gpl.html
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program; if not, see <http://www.gnu.org/licenses>.
+ */
+
+#ifndef _FD_TYPES_H
+#define _FD_TYPES_H
+
+#include <types.h>
+
+#define FOPEN_MAX 500 /*Maximum number of open file*/
+
+#define SEEK_SET 0 
+#define SEEK_CUR 1 
+#define SEEK_END 2 
+
+struct _open_file_descriptor;
+struct _fs_instance_t;
+struct _dentry_t;
+
+/**
+ * Structure containing pointers to functions related to a open file   .
+ */
+struct _open_file_operations_t {
+	
+	int (*write)(struct _open_file_descriptor *, const void*, size_t);
+
+	int (*read)(struct _open_file_descriptor *,void*, size_t);
+
+	int (*seek)(struct _open_file_descriptor *, long, int);
+
+	int (*ioctl)(struct _open_file_descriptor*, unsigned int, void *);
+
+	int (*open) (struct _open_file_descriptor*);
+
+	int (*close) (struct _open_file_descriptor*);
+
+	int (*readdir) (struct _open_file_descriptor*, char*, size_t);
+
+} open_file_operations_t;
+
+/*
+* File descriptor open. Each file is opened, a structure of this
+* type is instantiated to store the file and FS informations
+*/
+typedef struct _open_file_descriptor {
+	__u32 flags;
+	int current_cluster; 
+	char * pathname;
+	__u32 current_octet; 
+	__u8 select_sem;
+
+	struct _fs_instance_t *fs_instance;
+	struct _inode_t *inode;
+	struct _dentry_t *dentry;
+	struct _mounted_fs_t *mnt;
+	struct _open_file_operations_t *f_ops;
+	void * i_fs_specific; 
+	void * extra_data; 
+} open_file_descriptor;
+
+#endif

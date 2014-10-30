@@ -1,0 +1,160 @@
+
+#ifndef THREAD_H_
+#define THREAD_H_
+
+
+
+/* Forward declaration */
+struct thread;
+
+#include <mem_context.h>
+#include <sched.h>
+#include <kwaitq.h>
+#include <time.h>
+#include <process.h>
+#include <cpu_context.h>
+/**
+ * The possible states of a valid thread
+ */
+typedef enum { THR_CREATED, /**< Thread created, not fully initialized */
+	       THR_READY,   /**< Thread fully initialized or
+				     waiting for CPU after having been
+				     blocked or preempted */
+	       THR_RUNNING, /**< Thread currently running on CPU */
+	       THR_BLOCKED, /**< Thread waiting for I/O (+ in at LEAST
+				     one kwaitq) and/or sleeping (+ in NO
+				     kwaitq) */
+	       THR_ZOMBIE,  /**< Thread terminated execution, waiting to
+				     be deleted by kernel */
+             } thread_state_t;
+
+
+/**
+ * TCB (Thread Control Block): structure describing a thread. Don't
+ * access these fields directly: prefer using the accessor functions
+ * below.
+ */
+struct thread
+{
+#define THR_MAX_NAMELEN 32
+  char name[THR_MAX_NAMELEN];
+
+  thread_state_t  state;
+  sched_priority_t priority;
+
+  /**
+   * The hardware context of the thread.
+   *
+   * It will reflect the CPU state of the thread:
+   *  - From an interrupt handler: the state of the thread at the time
+   *    of the OUTERMOST irq. An IRQ is not allowed to make context
+   *    switches, so this context will remain valid from the begining of
+   *    the outermost IRQ handler to the end of it, no matter if there
+   *    are other IRQ handlers nesting in one another. You may safely
+   *    use it from IRQ handlers to query the state of the interrupted
+   *    thread, no matter if there has been other IRQ handlers
+   *    executing meanwhile.
+   *  - From normal kernel code, exceptions and syscall: the state of
+   *    the thread the last time there was a context switch from this
+   *    thread to another one. Thus this field WON'T reflect the
+   *    current's thread cpu_state in these cases. So, in these cases,
+   *    simply DO NOT USE IT outside thread.c ! Note: for syscall and
+   *    exception handlers, the VALID state of the interrupted thread is
+   *    passed as an argument to the handlers.
+   */
+  struct cpu_state *_cpu_state;
+
+  /* Kernel stack parameters */
+  unsigned int kernel_stack_base_addr;
+  unsigned int  kernel_stack_size;
+
+  /* Process this thread belongs to. Always NULL for a kernel
+     thread */
+  struct process *proc;
+
+  /**
+   * Address space currently "squatted" by the thread, or used to be
+   * active when the thread was interrupted/preempted. This is the MMU
+   * configuration expected before the cpu_state of the thread is
+   * restored on CPU.
+   *   - For kernel threads: should normally be NULL, meaning that the
+   *     thread will squat the current mm_context currently set in the
+   *     MMU. Might be NON NULL when a kernel thread squats a given
+   *     process to manipulate its address space.
+   *   - For user threads: should normally be NULL. More precisely:
+   *       - in user mode: the thread->process.mm_context is ALWAYS
+   *         set on MMU. squatted_mm_context is ALWAYS NULL in this
+   *         situation, meaning that the thread in user mode uses its
+   *         process-space as expected
+   *       - in kernel mode: NULL means that we keep on using the
+   *         mm_context currently set on MMU, which might be the
+   *         mm_context of another process. This is natural since a
+   *         thread in kernel mode normally only uses data in kernel
+   *         space. BTW, this limits the number of TLB flushes. However,
+   *         there are exceptions where this squatted_mm_context will
+   *         NOT be NULL. One is the copy_from/to_user API, which can
+   *         force the effective mm_context so that the MMU will be
+   *         (re)configured upon every context to the thread to match
+   *         the squatted_mm_context. Another exception is when a parent
+   *         thread creates the address space of a child process, in
+   *         which case the parent thread might temporarilly decide to
+   *         switch to the child's process space.
+   *
+   * This is the SOS implementation of the Linux "Lazy TLB" and
+   * address-space loaning.
+   */
+  struct mem_context *squatted_mm_context;
+
+  /* Data specific to each state */
+  union
+  {
+    struct
+    {
+      struct sos_sched_queue *rdy_queue;
+      struct thread     *rdy_prev, *rdy_next;
+    } ready;
+
+    struct
+    {
+      struct time user_time_spent_in_slice;
+    } running;
+  }; /* Anonymous union (gcc extenion) */
+
+
+  /*
+   * Data used by the kwaitq subsystem: list of kwaitqueues the thread
+   * is waiting for.
+   *
+   * @note: a RUNNING or READY thread might be in one or more
+   * waitqueues ! The only property we have is that, among these
+   * waitqueues (if any), _at least_ one has woken the thread.
+   */
+  struct kwaitq_entry *kwaitq_list;
+
+
+  /**
+   * Some statistics
+   */
+  struct rusage
+  {
+    /* Updated by sched.c */
+    struct time ru_utime; /* Time spent in user mode */
+    struct time ru_stime; /* Time spent in kernel mode */
+  } rusage;
+
+
+  /**
+   * Chaining pointers for the list of threads in the parent process
+   */
+  struct thread *prev_in_process, *next_in_process;
+
+
+  /**
+   * Chaining pointers for global ("gbl") list of threads (debug)
+   */
+  struct thread *gbl_prev, *gbl_next;
+};
+
+#endif
+
+

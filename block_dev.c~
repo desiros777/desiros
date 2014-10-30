@@ -1,0 +1,397 @@
+#include <types.h>
+#include <fs/fs.h>
+#include <list.h>
+#include <block_dev.h>
+#include <kerrno.h>
+#include <debug.h>
+#include <kmalloc.h>
+#include <fs/devfs.h>
+#include <vfs.h>
+#include "fs/ext2/ext2_internal.h"
+
+int blockdev_wrap_read(open_file_descriptor *this,void* buf, __u32 count, __u64 offset);
+int blockdev_wrap_write(open_file_descriptor *this,void* buf, __u32 count, __u64 offset);
+
+struct blockdev_instance
+{
+  /**
+   * Unique identifier (blockdev-wide) of this block device used by
+   * the sync_all_blockdev function. This enables sync_all_blockdev to
+   * be resilient to other register_partition/disk calls
+   */
+  __u64 uid;
+
+  /**
+   * Size of a block in bytes.
+   */
+  __u32     block_size;
+  /**
+   * Size of the device, in blocks
+   */
+  __u64   number_of_blocks;
+
+
+  /**
+   * For a partition: reference to the master disk and index of the
+   * first block in it
+   */
+  struct blockdev_instance *parent_blockdev;
+  __u64 index_of_first_block;
+
+  /** Major/minor for the device */
+  struct fs_dev_id_t dev_id;
+
+  struct blockdev_operations * operations;
+
+
+  void * custom_data;
+
+  __u32 ref_cnt;
+  struct blockdev_instance *next, *prev;
+};
+
+
+static blkdev_interfaces  blockdev_map_ops = { 
+	.read = blockdev_wrap_read,
+	.write = blockdev_wrap_write,
+	.ioctl = NULL,
+	.open = NULL,
+	.close = NULL
+};
+
+/** The list of all block devices registered */
+static struct blockdev_instance *registered_blockdev_instances;
+
+/** Last UID delivered for the FS instances */
+static __u64 last_fs_instance_uid;
+
+
+
+/**
+ * Return the device instance structure for the corresponding device
+ * class/instance, or NULL when none found.
+ */
+
+static struct blockdev_instance*
+lookup_blockdev_instance(__u32 device_class, __u32 device_instance)
+{
+  struct blockdev_instance * blockdev;
+  int nb;
+
+  list_foreach (registered_blockdev_instances, blockdev, nb)
+    {
+      if (blockdev->dev_id.device_class != device_class)
+	continue;
+      if (blockdev->dev_id.device_instance != device_instance)
+	continue;
+
+      return blockdev;
+    }
+
+  return NULL;
+}
+
+
+int blockdev_register_disk (const char* name,__u32     device_class,
+			    __u32     device_instance,
+			    int     block_size,
+			    __u64   number_of_blocks,
+			    __u32    blkcache_size_in_blocks,
+			    struct blockdev_operations * blockdev_ops,
+			    void * blockdev_instance_custom_data)
+{
+  struct blockdev_instance * blockdev;
+
+  blockdev = lookup_blockdev_instance(device_class, device_instance);
+  if (NULL != blockdev)
+    return -EBUSY;
+
+  if (block_size <= 0)
+    return -EINVAL;
+  if (number_of_blocks <= 0)
+    return -EINVAL;
+
+  blockdev = (struct blockdev_instance*)
+    kmalloc(sizeof(struct blockdev_instance), 0);
+  if (NULL == blockdev)
+    return -ENOMEM;
+
+  /* Description of the device */
+  blockdev->dev_id.device_class    = device_class;
+  blockdev->dev_id.device_instance = device_instance;
+
+  /* Description of the storage */
+  blockdev->block_size             = block_size;
+  blockdev->number_of_blocks       = number_of_blocks;
+  blockdev->parent_blockdev        = NULL;
+  blockdev->index_of_first_block   = 0;
+
+  /* Prepare the blkcache related stuff */
+  blockdev->operations             = blockdev_ops;
+  blockdev->custom_data            = blockdev_instance_custom_data;
+
+
+  blockdev->ref_cnt                = 1;
+
+  blockdev->uid = last_fs_instance_uid ++;
+  list_add_tail(registered_blockdev_instances, blockdev);
+
+  devfs_register_blkdev(name, &blockdev_map_ops ,(struct fs_dev_id_t *) &blockdev->dev_id);
+  
+  return OK;
+}
+
+/** Helper function used to increment the reference count for the
+    device */
+static int
+blockdev_use_instance(struct blockdev_instance * blockdev)
+{
+  if(blockdev == NULL) debug();
+  if(blockdev->ref_cnt < 0) debug();
+  blockdev->ref_cnt ++;
+  return OK;
+}
+
+int blockdev_register_partition(const char* name,__u32 device_class,
+				__u32 device_instance,
+				struct blockdev_instance * parent_bd,
+				__u64 index_of_first_block,
+				__u64 number_of_blocks,
+				void * blockdev_instance_custom_data)
+{
+  struct blockdev_instance * blockdev;
+
+  if (NULL == parent_bd){
+    return -EINVAL;
+    }
+
+
+  blockdev = lookup_blockdev_instance(device_class, device_instance);
+  if (NULL != blockdev){
+    return -EBUSY;
+    }
+  blockdev = (struct blockdev_instance*)
+    kmalloc(sizeof(struct blockdev_instance), 0);
+  if (NULL == blockdev){
+    return -ENOMEM;
+    }
+
+
+  /* Increase parent's reference count */
+  blockdev_use_instance(parent_bd);
+
+  /* Description of the device */
+  blockdev->dev_id.device_class    = device_class;
+  blockdev->dev_id.device_instance = device_instance;
+
+  /* Description of the storage */
+  blockdev->block_size             = parent_bd->block_size;
+  blockdev->number_of_blocks       = number_of_blocks;
+  blockdev->parent_blockdev        = parent_bd;
+  blockdev->index_of_first_block
+    = parent_bd->index_of_first_block + index_of_first_block;
+
+  /* Prepare the blkcache related stuff */
+  blockdev->operations             = parent_bd->operations;
+  blockdev->custom_data            = parent_bd->custom_data;
+
+
+  blockdev->ref_cnt                = 1;
+
+  blockdev->uid = last_fs_instance_uid ++;
+  list_add_tail(registered_blockdev_instances, blockdev);
+
+  devfs_register_blkdev(name, &blockdev_map_ops ,(struct fs_dev_id_t *) &blockdev->dev_id);
+
+  return OK;
+}
+
+struct blockdev_instance *blockdev_ref_instance(__u32 device_class,
+			  __u32 device_instance)
+{
+  struct blockdev_instance * blockdev;
+  blockdev = lookup_blockdev_instance(device_class,
+				      device_instance);
+  if (NULL == blockdev)
+    return NULL;
+
+  blockdev_use_instance(blockdev);
+  return blockdev;
+}
+
+
+/** Helper function used to decrement the reference count for the
+    device */
+int blockdev_release_instance(struct  blockdev_instance * blockdev)
+{
+  if(blockdev->ref_cnt < 1)debug();
+  blockdev->ref_cnt --;
+  return OK;
+}
+
+static int blockdev_generic_read(struct blockdev_instance * blockdev,
+		       __u64 offset_in_device,
+		       __u32 buff_addr,
+		       __u32 * /* in/out */len)
+{
+  int rdbytes = 0;
+
+
+
+  while (rdbytes < *len)
+    {
+           kprintf("READ ---> % %i \n",rdbytes );
+
+      int retval;
+     __u32 offset_in_block, wrbytes;
+      /* Get the block at the current offset */
+      __u64 block_id
+	= offset_in_device / blockdev->block_size;
+
+
+      /* reaching the end of the device ? */
+      if (block_id >= blockdev->number_of_blocks)
+	break;
+
+      wrbytes = *len - rdbytes;
+
+     
+      /* Translating this block index into an offset inside the
+	 disk */
+      block_id += blockdev->index_of_first_block;
+
+      __u32 block_data = kmalloc(blockdev->block_size ,0);
+
+      if (OK != blockdev->operations->read_block(blockdev->custom_data,
+				block_data ,block_id ))
+     debug("blockdev op");
+      
+
+      /* Copy the data to user */
+      offset_in_block
+	= offset_in_device % blockdev->block_size;
+      wrbytes
+	= blockdev->block_size - offset_in_block;
+      if (*len - rdbytes < wrbytes)
+	wrbytes = *len - rdbytes;
+
+      memcpy(buff_addr + rdbytes ,block_data + offset_in_block,wrbytes);
+      
+	  rdbytes          += wrbytes;
+	  offset_in_device += wrbytes;
+	
+   
+    }
+
+  *len = rdbytes;
+  return OK;
+}
+
+int blockdev_kernel_read(struct blockdev_instance * blockdev,
+				   __u64 offset,
+				   __u32 dest_buf,
+				   __u32 * /* in/out */len)
+{
+  int retval;
+
+
+  blockdev_use_instance(blockdev);
+
+  retval = blockdev_generic_read(blockdev, offset, dest_buf , len);
+
+
+  blockdev_release_instance(blockdev);
+
+  return retval ;
+}
+
+
+int blockdev_wrap_read(open_file_descriptor *this,void* buf, __u32 count, __u64 offset) 
+{
+
+
+   struct blockdev_instance * blockdev;
+
+   struct fs_dev_id_t *dev_id = this->inode->dev_id; 
+   blockdev = lookup_blockdev_instance(dev_id->device_class, dev_id->device_instance);
+
+   int retval = blockdev_generic_read(blockdev, offset,buf, &count );
+
+
+  return retval;
+}
+
+static int
+blockdev_generic_write(struct blockdev_instance * blockdev,
+		       __u64 offset_in_device,
+		       __u32 buff_addr,
+		       __u32 * /* in/out */len)
+{
+  __u32 wrbytes = 0;
+
+  while (wrbytes < *len)
+    {
+    
+      int retval;
+      __u32 offset_in_block, usrbytes;
+
+      /* Get the block at the current file offset */
+      __u64 block_id
+	= offset_in_device / blockdev->block_size;
+
+      /* reaching the end of the device ? */
+      if (block_id >= blockdev->number_of_blocks)
+	break;
+
+      usrbytes = *len - wrbytes;
+
+      /* Translating this block index into an offset inside the
+	 disk */
+      block_id += blockdev->index_of_first_block;
+
+      /* Compute size of data to copy */
+      offset_in_block
+	= offset_in_device % blockdev->block_size;
+      usrbytes
+	= blockdev->block_size - offset_in_block;
+      if (*len - wrbytes < usrbytes)
+	usrbytes = *len - wrbytes;
+
+       __u32 block_data = kmalloc(blockdev->block_size ,0);
+       
+
+       memcpy(block_data + offset_in_block , buff_addr ,usrbytes);
+
+      if (OK != blockdev->operations->write_block(blockdev->custom_data,
+				block_data ,block_id ))
+     debug("blockdev op");
+     
+
+	  wrbytes          += usrbytes;
+	  offset_in_device += usrbytes;
+	
+    }
+
+  *len = wrbytes;
+  return OK;
+}
+
+
+int blockdev_wrap_write(open_file_descriptor *this,void* buf, __u32 count, __u64 offset) 
+{
+
+   struct blockdev_instance * blockdev;
+
+   struct fs_dev_id_t *dev_id = this->inode->dev_id; 
+   blockdev = lookup_blockdev_instance(dev_id->device_class, dev_id->device_instance);
+
+   int retval = blockdev_generic_write(blockdev, offset,buf, &count );
+
+
+  return retval;
+
+
+}
+
+
+

@@ -1,0 +1,3 @@
+
+#include <klibc.h>
+#define debug() kprintf("DEBUG %s:%d:\n", __FILE__, __LINE__)

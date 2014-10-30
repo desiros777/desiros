@@ -1,0 +1,55 @@
+/**
+ * @file kdirent.h
+ * Copyright (C) 2010, 2011, 2012 - TacOS developers.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 3 of
+ * the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details at
+ * http://www.gnu.org/copyleft/gpl.html
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program; if not, see <http://www.gnu.org/licenses>.
+ *
+ */
+
+#ifndef _KDIRENT_H
+#define _KDIRENT_H
+
+#include <types.h>
+#include <fs/kstat.h>
+
+#define NAME_MAX 256 /**< Longueur maximale d'un nom de fichier. */
+
+/**
+ * Entrée de dossier.
+ */
+struct dirent {
+	__u32  d_ino; /**< Numéro inode. */
+	__u16  d_reclen; /**< Longueur du nom de l'entrée. */
+	__u8   d_type; /**< Type de fichier. */
+	char      d_name[NAME_MAX]; /**< Nom de l'entrée. */
+};
+
+/**
+ * Types de fichiers pour le champ "d_type".
+ */
+enum {
+	DT_UNKNOWN = 0,
+	DT_FIFO = 1,
+	DT_CHR = 2,
+	DT_DIR = 4,
+	DT_BLK = 6,
+	DT_REG = 8,
+	DT_LNK = 10,
+	DT_SOCK = 12,
+	DT_WHT = 14
+};
+
+
+#endif

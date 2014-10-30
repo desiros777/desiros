@@ -1,0 +1,99 @@
+# Copyright (C) 2004,2005  The DESIROS Team
+#      desiros.dev@gmail.com
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307,
+# USA.
+
+
+.global _asm_default_int,_asm_irq_0, _asm_exc_PF,_asm_syscalls
+
+.macro	SAVE_REGS 
+  push $0
+
+  push %ebp
+  mov %esp, %ebp
+
+  push %edi
+  push %esi
+  push %edx
+  push %ecx
+  push %ebx
+  push %eax
+  subl  $2,%esp
+  pushw %ss
+  pushw %ds
+  pushw %es
+  pushw %fs
+  pushw %gs
+
+  movw $0x10,%bx
+  movw %bx, %ds
+  movw %bx , %es
+  movw %bx , %fs
+  movw %bx , %gs
+  pushl %esp /* user_ctxt */
+  pushl %eax /* syscall ID */
+        
+.endm
+
+.macro	RESTORE_REGS 
+
+ addl  $8, %esp
+      /* Restore the user context */
+  popw  %gs
+  popw  %fs
+  popw  %es
+  popw  %ds
+  popw  %ss
+  add  $2,%esp
+  pop  %eax /* This is the return value of do_syscall (see above) */
+  pop  %ebx
+  pop  %ecx
+  pop  %edx
+  pop  %esi
+  pop  %edi
+ 
+  pop  %ebp
+  addl $4, %esp
+
+.endm
+
+_asm_default_int:
+	SAVE_REGS
+	call isr_default_int
+	movb $0x20,%al
+	outb %al,$0x20
+	RESTORE_REGS
+	iret
+
+_asm_irq_0:
+	SAVE_REGS
+	call isr_clock_int
+	movb $0x20,%al
+	outb %al,$0x20
+	RESTORE_REGS
+	iret
+
+_asm_exc_PF:
+	SAVE_REGS
+	call isr_PF_exc
+	RESTORE_REGS
+	add  $4,%esp 
+	iret
+
+_asm_syscalls:
+SAVE_REGS
+call do_syscalls
+RESTORE_REGS
+iret

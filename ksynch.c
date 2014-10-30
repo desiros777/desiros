@@ -1,0 +1,221 @@
+
+
+
+
+
+#include <ksynch.h>
+#include <process.h>
+#include <kerrno.h>
+#include <interrupt.h>
+
+int ksema_init(struct ksema *sema, const char *name,
+			 int initial_value)
+{
+  sema->value = initial_value;
+  return kwaitq_init(& sema->kwaitq, name);
+}
+
+
+int ksema_dispose(struct ksema *sema)
+{
+  return kwaitq_dispose(& sema->kwaitq);
+}
+
+
+int ksema_down(struct ksema *sema)
+{
+  __u32 flags;
+  int retval;
+
+  disable_IRQs(flags);
+  retval = OK;
+
+  sema->value --;
+  if (sema->value < 0)
+    {
+      /* Wait for somebody to wake us */
+      retval = kwaitq_wait(& sema->kwaitq);
+
+      /* Something wrong happened (timeout, external wakeup, ...) ? */
+      if (OK != retval)
+	{
+	  /* Yes: pretend we did not ask for the semaphore */
+	  sema->value ++;
+	}
+    }
+
+  restore_IRQs(flags);
+  return retval;
+}
+
+
+int ksema_trydown(struct ksema *sema)
+{
+  __u32 flags;
+  int retval;
+
+  disable_IRQs(flags);
+
+  /* Can we take the semaphore without blocking ? */
+  if (sema->value >= 1)
+    {
+      /* Yes: we take it now */
+      sema->value --;      
+      retval = OK;
+    }
+  else
+    {
+      /* No: we signal it */
+      retval = -EBUSY;
+    }
+
+  restore_IRQs(flags);
+  return retval;
+}
+
+
+int ksema_up(struct ksema *sema)
+{
+  __u32 flags;
+  int retval;
+
+  disable_IRQs(flags);
+
+  sema->value ++;
+  retval = kwaitq_wakeup(& sema->kwaitq, 1, OK);
+
+  restore_IRQs(flags);
+  return retval;
+}
+
+
+int kmutex_init(struct kmutex *mutex, const char *name)
+{
+  mutex->owner = NULL;
+  return kwaitq_init(& mutex->kwaitq, name);
+}
+
+
+int kmutex_dispose(struct kmutex *mutex)
+{
+  return kwaitq_dispose(& mutex->kwaitq);
+}
+
+
+/*
+ * Implementation based on ownership transfer (ie no while()
+ * loop). The only assumption is that the thread awoken by
+ * kmutex_unlock is not suppressed before effectively waking up: in
+ * that case the mutex will be forever locked AND unlockable (by
+ * nobody other than the owner, but this is not natural since this
+ * owner already issued an unlock()...). The same problem happens with
+ * the semaphores, but in a less obvious manner.
+ */
+int kmutex_lock(struct kmutex *mutex)
+{
+  __label__ exit_kmutex_lock;
+  __u32 flags;
+  int retval;
+
+  disable_IRQs(flags);
+  retval = OK;
+
+  /* Mutex already owned ? */
+  if (NULL != mutex->owner)
+    {
+      /* Owned by us or by someone else ? */
+      if (current == mutex->owner)
+	{
+	  /* Owned by us: do nothing */
+	  retval = -EBUSY;
+	  goto exit_kmutex_lock;
+	}
+
+      /* Wait for somebody to wake us */
+      retval = kwaitq_wait(& mutex->kwaitq);
+
+      /* Something wrong happened ? */
+      if (OK != retval)
+	{
+	  goto exit_kmutex_lock;
+	}
+    }
+
+  /* Ok, the mutex is available to us: take it */
+  mutex->owner = current;
+
+ exit_kmutex_lock:
+  restore_IRQs(flags);
+  return retval;
+}
+
+
+bool kmutex_owned_by_me(struct kmutex const* mutex)
+{
+  __u32 flags;
+  bool retval;
+
+  disable_IRQs(flags);
+  retval = (current == mutex->owner);
+  restore_IRQs(flags);
+
+  return retval;
+}
+
+
+int kmutex_trylock(struct kmutex *mutex)
+{
+  __u32 flags;
+  int retval;
+
+  disable_IRQs(flags);
+
+  /* Mutex available to us ? */
+  if (NULL == mutex->owner)
+    {
+      /* Great ! Take it now */
+      mutex->owner = current;
+
+      retval = OK;
+    }
+  else
+    {
+      /* No: signal it */
+      retval = -EBUSY;
+    }
+
+  restore_IRQs(flags);
+  return retval;
+}
+
+
+int kmutex_unlock(struct kmutex *mutex)
+{
+  __u32 flags;
+  int  retval;
+
+  disable_IRQs(flags);
+
+  if ( current != mutex->owner)
+    retval = -EPERM;
+
+  else if (kwaitq_is_empty(& mutex->kwaitq))
+    {
+      /*
+       * There is NOT ANY thread waiting => we really mark the mutex
+       * as FREE
+       */
+      mutex->owner = NULL;
+      retval = OK;
+    }
+  else
+    {
+     
+
+      /* We wake up ONE thread ONLY */
+      retval = kwaitq_wakeup(& mutex->kwaitq, 1, OK);
+    } 
+ 
+  restore_IRQs(flags);
+  return retval;
+}

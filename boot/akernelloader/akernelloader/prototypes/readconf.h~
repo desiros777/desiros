@@ -1,0 +1,10 @@
+#ifndef __READCONF_H__
+#define __READCONF_H__	1
+
+#include <fs_ak.h>
+
+int getaline(FILE * f , char * cmdline, int size);
+char *find_arg ( char *cmdline);
+char *find_command (char *command);
+
+#endif

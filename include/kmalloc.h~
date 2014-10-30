@@ -1,0 +1,47 @@
+/* Copyright (C) 2004,2005  The DESIROS Team
+    desiros.dev@gmail.com
+
+   This program is free software; you can redistribute it and/or
+   modify it under the terms of the GNU General Public License
+   as published by the Free Software Foundation; either version 2
+   of the License, or (at your option) any later version.
+   
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+   
+   You should have received a copy of the GNU General Public License
+   along with this program; if not, write to the Free Software
+   Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307,
+   USA. 
+ */
+
+
+#ifndef _KMALLOC_H_
+#define _KMALLOC_H_
+
+
+int kmalloc_setup();
+
+/*
+ * kmalloc flags
+ */
+/** kmalloc() should succeed without blocking, or return NULL */
+#define KMALLOC_ATOMIC  1
+
+/**
+ * Allocate a kernel object of the given size in the most suited slab
+ * cache if size can be handled by one of the pre-allocated caches, or
+ * using directly the range allocator otherwise. The object will
+ * allways be mapped in physical memory (ie implies
+ * KSLAB_CREATE_MAP and KVMM_MAP).
+ *
+ * @param size  The size of the object
+ * @param flags The allocation flags (KMALLOC_* flags)
+ */
+__u32 kmalloc(__u32 size, __u32 flags);
+
+int kfree(__u32 vaddr);
+
+#endif /* _KMALLOC_H_ */
